@@ -1,4 +1,6 @@
 const std = @import("std");
+const StringHashMap = std.StringHashMap;
+const Allocator = std.mem.Allocator;
 
 // Dynamic Vars
 pub const ESVarType = enum {
@@ -7,10 +9,6 @@ pub const ESVarType = enum {
 
 pub const ESNumber = struct {
   value: f64,
-
-  pub fn add(self: *ESNumber, val: f64) void {
-    self.value += val;
-  }
 
   pub fn toString(self: *const ESNumber) []const u8 {
     var integer: bool = self.value == std.math.round(self.value);
@@ -38,6 +36,45 @@ pub const ESNumber = struct {
   }
 };
 
+pub const ESObject = struct {
+  value: *ESObjectImpl,
+
+  pub fn toString(_: *const ESObject) []const u8 {
+    return "{}";
+  }
+};
+
+pub const ESObjectImpl = struct {
+  allocator: *const Allocator,
+  properties: StringHashMap(ESType),
+
+  pub fn addProperty(self: *ESObjectImpl, identifier: []const u8, value: ESType) !void {
+    try self.properties.put(identifier, value);
+  }
+
+  pub fn init(allocator: Allocator) !*ESObjectImpl {
+    const object = try allocator.create(ESObjectImpl);
+    object.* = .{
+      .allocator = &allocator,
+      .properties = StringHashMap(ESType).init(allocator),
+    };
+    return object;
+  }
+};
+
+pub const ESNativeFunction = struct {
+  value: usize,
+
+  pub fn call(self: *ESNativeFunction, args: [][]const u8) !void {
+    const func: *const fn([][]const u8) void = @ptrFromInt(self.value);
+    return func(args);
+  }
+
+  pub fn toString(_: ESNativeFunction) []const u8 {
+    return "[native function]";
+  }
+};
+
 pub const ESString = struct {
   value: []const u8,
 
@@ -51,6 +88,8 @@ pub const ESType = union(enum) {
   String: ESString,
   // Function: *const ESFunction,
   Undefined: ESUndefined,
+  NativeFunction: ESNativeFunction,
+  Object: ESObject,
 };
 
 /// Represents an "undefined" value
@@ -88,4 +127,10 @@ pub const Instruction = union(enum) {
   Write: []const u8,
   /// Add a value to a register
   Add: []const u8,
+  /// Loads an object property into the register
+  ReadProperty: []const u8,
+  /// Invokes the currently loaded property as a method
+  Invoke: struct {
+     args: [][]const u8,
+  }
 };

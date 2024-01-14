@@ -11,10 +11,15 @@ const ESString = types.ESString;
 const ESReference = types.ESReference;
 const ESType = types.ESType;
 const ESUndefined = types.ESUndefined;
+const ESObject = types.ESObject;
+const ESObjectImpl = types.ESObjectImpl;
+const ESNativeFunction = types.ESNativeFunction;
 const UNDEFINED = types.UNDEFINED;
 const InvokeAssign = types.InvokeAssign;
 const InvokeAdd = types.InvokeAdd;
 const Instruction = types.Instruction;
+
+const gc = @import("gc.zig");
 
 const utils = @import("utils.zig");
 
@@ -22,24 +27,26 @@ const utils = @import("utils.zig");
 /// scope, or the body of a function.
 const ESScope = struct {
   allocator: Allocator,
-  /// The list of variables
   vars: StringHashMap(*ESReference),
-  /// The list of instructions for this scope
   callStack: ArrayList(*Instruction),
-  /// A special value used to hold values during their mutation.
-  /// Future versions may support multiple registers, however unlike
-  /// CPU registers, these are per-scope (which may allow for multi-threaded
-  /// execution,
   register: ?ESType,
+  objectManager: *gc.ESObjectManager,
+
+  // TODO: Move
+  pub fn log(args: [][]const u8) void {
+    std.debug.print("{s}\n", .{args[0]});
+  }
 
   /// Creates a new scope
-  pub fn init(allocator: Allocator) !*ESScope {
+  pub fn init(allocator: Allocator, objectManager: *gc.ESObjectManager) !*ESScope {
     var ptr = try allocator.create(ESScope);
+
     ptr.* = ESScope {
       .allocator = allocator,
       .vars = StringHashMap(*ESReference).init(allocator),
       .callStack = ArrayList(*Instruction).init(allocator),
       .register = null,
+      .objectManager = objectManager,
     };
 
     // Pre-assign standard elements
@@ -49,6 +56,16 @@ const ESScope = struct {
     try ptr.assignVarNumber("NaN", std.math.nan(f64));
     try ptr.declareVar("Infinity", .CONST);
     try ptr.assignVarNumber("Infinity", std.math.inf(f64));
+    try ptr.declareVar("console", .CONST);
+
+    var console = ESType { .Object = try objectManager.createObject() };
+    var fnptr = @intFromPtr(&ESScope.log);
+    try console.Object.value.addProperty("log", .{
+      .NativeFunction = . {
+        .value = fnptr,
+      }
+    });
+    try ptr.assignVar("console", console);
 
     return ptr;
   }
@@ -103,6 +120,8 @@ const ESScope = struct {
         .String => |str| std.debug.print("{s}<String> = \"{s}\"\n", .{identifier, str.toString()}),
         .Number => |num|  std.debug.print("{s}<Number> = {s}\n", .{identifier, num.toString()}),
         .Undefined => |undf| std.debug.print("{s}<Undefined> = {s}\n", .{identifier, undf.toString()}),
+        .Object => |obj| std.debug.print("{s}<Object> = {s}\n", .{identifier, obj.toString()}),
+        .NativeFunction => |fun| std.debug.print("{s}<NativeFunction> = {s}\n", .{identifier, fun.toString()}),
       }
     } else {
       return std.debug.print("{s}<err> = {s} is not declared.\n", .{identifier, identifier});
@@ -177,6 +196,39 @@ const ESScope = struct {
             return error.RegisterEmpty;
           }
         },
+        .ReadProperty => |identifier| {
+          if (self.register) |registerItem| {
+            switch (registerItem) {
+              .Object => |objContainer| {
+                var obj = objContainer.value;
+                if (obj.properties.get(identifier)) |prop| {
+                  self.register = prop;
+                } else {
+                  return error.NoSuchProperty;
+                }
+              },
+              else => {
+                return error.NotAnObject;
+              }
+            }
+          } else {
+            return error.ReferenceError;
+          }
+        },
+        .Invoke => |invocation| {
+          if (self.register) |registerItem| {
+            switch (registerItem) {
+              .NativeFunction => |func| {
+                var funcCast = func;
+                try funcCast.call(invocation.args);
+              },
+              else => {
+                return error.NotAFunction;
+              }
+            }
+          }
+          // NO-OP
+        }
       }
     }
     //return error.NotImplemented;
@@ -210,14 +262,17 @@ const ESScope = struct {
 pub const ESRuntime = struct {
   allocator: Allocator,
   scope: *ESScope,
+  objectManager: gc.ESObjectManager,
 
   pub fn init(allocator: Allocator) !*ESRuntime {
+    var objectManager = gc.ESObjectManager.init(allocator);
     var ptr = try allocator.create(ESRuntime);
-    var scope = try ESScope.init(allocator);
+    var scope = try ESScope.init(allocator, &objectManager);
 
     ptr.* = ESRuntime {
       .allocator = allocator,
       .scope = scope,
+      .objectManager = objectManager,
     };
     return ptr;
   }
@@ -227,6 +282,7 @@ pub const ESRuntime = struct {
   }
 
   pub fn deinit(self: *ESRuntime) void {
+    self.objectManager.deinit();
     self.scope.deinit();
     self.allocator.destroy(self);
   }
@@ -324,6 +380,15 @@ test "Dev Testbench" {
   // twoNinetyNine - 299;
   try runtime.scope.push(Instruction { .Read = "twoNinetyNine" });
   try runtime.scope.push(Instruction { .Add = "-299" });
+
+  // Attempts to call console.log
+  try runtime.scope.push(Instruction { .Read = "console" });
+  try runtime.scope.push(Instruction { .ReadProperty = "log" });
+  var args = [_][]const u8 {
+    "Hello World! :)",
+  };
+  try runtime.scope.push(Instruction { .Invoke = .{ .args = &args } });
+
 
   try runtime.exec();
 
