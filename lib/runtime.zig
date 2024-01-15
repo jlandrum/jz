@@ -19,244 +19,10 @@ const InvokeAssign = types.InvokeAssign;
 const InvokeAdd = types.InvokeAdd;
 const Instruction = types.Instruction;
 
+const ESScope = @import("scope.zig").ESScope;
+
 const gc = @import("gc.zig");
-
 const utils = @import("utils.zig");
-
-/// Represents an execution scope. This can be the root execution
-/// scope, or the body of a function.
-const ESScope = struct {
-  allocator: Allocator,
-  vars: StringHashMap(*ESReference),
-  callStack: ArrayList(*Instruction),
-  register: ?ESType,
-  objectManager: *gc.ESObjectManager,
-
-  // TODO: Move
-  pub fn log(args: [][]const u8) void {
-    std.debug.print("{s}\n", .{args[0]});
-  }
-
-  /// Creates a new scope
-  pub fn init(allocator: Allocator, objectManager: *gc.ESObjectManager) !*ESScope {
-    var ptr = try allocator.create(ESScope);
-
-    ptr.* = ESScope {
-      .allocator = allocator,
-      .vars = StringHashMap(*ESReference).init(allocator),
-      .callStack = ArrayList(*Instruction).init(allocator),
-      .register = null,
-      .objectManager = objectManager,
-    };
-
-    // Pre-assign standard elements
-    try ptr.declareVar("undefined", .CONST);
-    try ptr.assignVar("undefined", UNDEFINED);
-    try ptr.declareVar("NaN", .CONST);
-    try ptr.assignVarNumber("NaN", std.math.nan(f64));
-    try ptr.declareVar("Infinity", .CONST);
-    try ptr.assignVarNumber("Infinity", std.math.inf(f64));
-    try ptr.declareVar("console", .CONST);
-
-    var console = ESType { .Object = try objectManager.createObject() };
-    var fnptr = @intFromPtr(&ESScope.log);
-    try console.Object.value.addProperty("log", .{
-      .NativeFunction = . {
-        .value = fnptr,
-      }
-    });
-    try ptr.assignVar("console", console);
-
-    return ptr;
-  }
-
-  pub fn push(self: *ESScope, invocation: Instruction) !void {
-    var ptr = try self.allocator.create(Instruction);
-    ptr.* = invocation;
-    _ = try self.callStack.append(ptr);
-  }
-
-  pub fn declareVar(self: *ESScope, identifier: []const u8, vartype: ESVarType) !void {
-    if (self.vars.get(identifier)) |value| {
-      if (value.vartype == .CONST) {
-        std.debug.print("Attempted to redeclare const {s}", .{identifier});
-        return error.CannotRedeclareConst;
-      }
-    }
-
-    const ptr = try self.allocator.create(ESReference);
-    ptr.* = ESReference {
-      .value = UNDEFINED,
-      .vartype = vartype,
-      .assigned = false,
-      .readonly = false
-    };
-
-    try self.vars.put(identifier, ptr);
-  }
-
-  fn assignVar(self: *ESScope, identifier: []const u8, value: ESType) !void {
-    if (self.vars.get(identifier)) |v| {
-      if (v.vartype == .CONST and v.assigned) { return error.CannotReassignConst; }
-      if (v.readonly) { return error.CannotAssignToReadOnly; }
-      v.value = value;
-      v.assigned = true;
-      return;
-    }
-    return error.NoSuchIdentifier;
-  }
-
-  fn assignVarString(self: *ESScope, identifier: []const u8, value: []const u8) !void {
-    return self.assignVar(identifier, ESType { .String = .{ .value = value } });
-  }
-
-  fn assignVarNumber(self: *ESScope, identifier: []const u8, value: f64) !void {
-    return self.assignVar(identifier, ESType { .Number = .{ .value = value } });
-  }
-
-  pub fn debugValue(self: *ESScope, identifier: []const u8) !void {
-    if (self.vars.get(identifier)) |v| {
-      switch (v.value) {
-        .String => |str| std.debug.print("{s}<String> = \"{s}\"\n", .{identifier, str.toString()}),
-        .Number => |num|  std.debug.print("{s}<Number> = {s}\n", .{identifier, num.toString()}),
-        .Undefined => |undf| std.debug.print("{s}<Undefined> = {s}\n", .{identifier, undf.toString()}),
-        .Object => |obj| std.debug.print("{s}<Object> = {s}\n", .{identifier, obj.toString()}),
-        .NativeFunction => |fun| std.debug.print("{s}<NativeFunction> = {s}\n", .{identifier, fun.toString()}),
-      }
-    } else {
-      return std.debug.print("{s}<err> = {s} is not declared.\n", .{identifier, identifier});
-    }
-  }
-
-  fn getVar(self: *ESScope, identifier: []const u8) ?ESType {
-    if (self.vars.get(identifier)) |v| {
-      return v.value;
-    }
-    return null;
-  }
-
-  pub fn exec(self: *ESScope) !void {
-    for (self.callStack.items) |call| {
-      switch (call.*) {
-        .Set => |inv| {
-          switch (inv.value[0]) {
-            '"' => try self.assignVarString(inv.identifier, inv.value[1..inv.value.len-1]),
-            '\'' => try self.assignVarString(inv.identifier, inv.value[1..inv.value.len-1]),
-            else => {
-              if (utils.isNumber(inv.value)) {
-                try self.assignVarNumber(inv.identifier, utils.parseNumber(inv.value));
-              } else if (self.getVar(inv.value)) |variable| {
-                try self.assignVar(inv.identifier, variable);
-              } else {
-                return error.InvalidAssignment;
-              }
-            }
-          }
-        },
-        .Read => |identifier| {
-          if (self.getVar(identifier)) |variable| {
-            const copy = variable;
-            self.register = copy;
-          } else {
-            return error.ReferenceError;
-          }
-        },
-        .Write => |identifier| {
-          if (self.register) |register| {
-            if (self.getVar(identifier)) |_| {
-              try self.assignVar(identifier, register);
-            } else {
-              return error.ReferenceError;
-            }
-          } else {
-            return error.RegisterEmpty;
-          }
-        },
-        .Add => |value| {
-          if (self.register) |*reg| {
-            switch (reg.*) {
-              .Number => |*num| {
-                if (utils.isNumber(value)) {
-                  num.value += utils.parseNumber(value);
-                }
-                else if (self.getVar(value)) |*varval| {
-                  switch (varval.*) {
-                    .Number => |*addval| {
-                      num.value += addval.value;
-                    },
-                    else => {}
-                  }
-                }
-              },
-              else => {
-                return error.NotImplemented;
-              }
-            }
-          } else {
-            return error.RegisterEmpty;
-          }
-        },
-        .ReadProperty => |identifier| {
-          if (self.register) |registerItem| {
-            switch (registerItem) {
-              .Object => |objContainer| {
-                var obj = objContainer.value;
-                if (obj.properties.get(identifier)) |prop| {
-                  self.register = prop;
-                } else {
-                  return error.NoSuchProperty;
-                }
-              },
-              else => {
-                return error.NotAnObject;
-              }
-            }
-          } else {
-            return error.ReferenceError;
-          }
-        },
-        .Invoke => |invocation| {
-          if (self.register) |registerItem| {
-            switch (registerItem) {
-              .NativeFunction => |func| {
-                var funcCast = func;
-                try funcCast.call(invocation.args);
-              },
-              else => {
-                return error.NotAFunction;
-              }
-            }
-          }
-          // NO-OP
-        }
-      }
-    }
-    //return error.NotImplemented;
-  }
-
-  pub fn getError(err: anyerror) []const u8 {
-    switch (err) {
-      .ReferenceError => return "Invalid reference",
-      .InvalidAssignment => return "Invalid assignment",
-      .NotImplemented => return "Operation not supported",
-      .RegisterEmpty => return "Cannot perform operation with no active register",
-      else => "Unknown error",
-    }
-  }
-
-  pub fn deinit(self: *ESScope) void {
-    var it = self.vars.valueIterator();
-    while (it.next()) |entry| {
-      self.allocator.destroy(entry.*);
-    }
-    for (self.callStack.items) |entry| {
-      self.allocator.destroy(entry);
-    }
-    self.callStack.deinit();
-    self.vars.deinit();
-    self.allocator.destroy(self);
-  }
-};
 
 /// Handles execution of instructions
 pub const ESRuntime = struct {
@@ -268,6 +34,7 @@ pub const ESRuntime = struct {
     var objectManager = gc.ESObjectManager.init(allocator);
     var ptr = try allocator.create(ESRuntime);
     var scope = try ESScope.init(allocator, &objectManager);
+    try scope.initStdLib();
 
     ptr.* = ESRuntime {
       .allocator = allocator,
@@ -296,9 +63,9 @@ test "Create var and assign" {
   // const a = "String!";
 
   // Hoisted const a;
-  try runtime.scope.declareVar("a", .CONST);
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "a", .type = .CONST } });
   // a = "String!";
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "a", .value = "\"String!\""} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "\"String!\""} });
 
   try runtime.exec();
 }
@@ -312,11 +79,11 @@ test "Ensure const cannot be reassigned" {
   // a = "Another string!";
 
   // Hoisted const a;
-  try runtime.scope.declareVar("a", .CONST);
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "a", .type = .CONST } });
   // a = "String!";
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "a", .value = "\"String!\""} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "\"String!\""} });
   // a = "String!";
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "a", .value = "\"Another string!\""} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "\"Another string!\""} });
 
   try std.testing.expectError(error.CannotReassignConst, runtime.exec());
 }
@@ -330,11 +97,39 @@ test "Ensure let can be reassigned" {
   // a = "Another string!";
 
   // Hoisted let a;
-  try runtime.scope.declareVar("a", .LET);
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "a", .type = .LET } });
   // a = "String!";
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "a", .value = "\"String!\""} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "\"String!\""} });
   // a = "Another string!";
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "a", .value = "\"Another string!\""} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "\"Another string!\""} });
+
+  try runtime.exec();
+}
+
+test "Create and run method" {
+  const runtime = try ESRuntime.init(TestAllocator);
+  defer runtime.deinit();
+
+  // const add;
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "add",  .type = .CONST } });
+
+  // add = () => { console.log("Hello World! :)"); }
+  const fnScope = try runtime.scope.createScope();
+  try fnScope.push( .{ .Read = "console" });
+  try fnScope.push( .{ .ReadProperty = "log" });
+  var args = [_][]const u8 {
+    "Hello World! :)",
+  };
+  try fnScope.push( .{ .Invoke = .{ .args = &args } });
+  try runtime.scope.push( .{ .SetReference = .{ .identifier = "add", .value = .{
+    .Function = .{
+      .scope = fnScope,
+    },
+  }}});
+
+  // add();
+  try runtime.scope.push( .{ .Read = "add" });
+  try runtime.scope.push( .{ .Invoke = .{ .args = null }});
 
   try runtime.exec();
 }
@@ -344,51 +139,50 @@ test "Dev Testbench" {
   defer runtime.deinit();
 
   // const oneHundred;
-  try runtime.scope.declareVar("oneHundred", .CONST);
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "oneHundred", .type = .CONST } });
   // const twoHundred;
-  try runtime.scope.declareVar("twoHundred", .CONST);
+  try runtime.scope.push(.{ .Declare = .{ .identifier = "twoHundred", .type = .CONST } });
   // let twoNinetyNine;
-  try runtime.scope.declareVar("twoNinetyNine", .LET);
+  try runtime.scope.push(.{ .Declare = .{ .identifier = "twoNinetyNine", .type = .LET } });
 
   // Vars can have their values set directly.
   // oneHundred = 100;
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "oneHundred", .value = "100"} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "oneHundred", .value = "100"} });
   // twoHundred = 200;
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "twoHundred", .value = "200"} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "twoHundred", .value = "200"} });
 
   // Vars can also have their values copied from another variable.
   // twoNinetyNine = oneHundred;
-  try runtime.scope.push(Instruction { .Set = .{ .identifier = "twoNinetyNine", .value = "oneHundred"} });
+  try runtime.scope.push( .{ .Set = .{ .identifier = "twoNinetyNine", .value = "oneHundred"} });
   // twoNinetyNine += twoHundred;
-  try runtime.scope.push(Instruction { .Read = "twoNinetyNine" });
-  try runtime.scope.push(Instruction { .Add = "twoHundred" });
-  try runtime.scope.push(Instruction { .Write = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Read = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Add = "twoHundred" });
+  try runtime.scope.push( .{ .Write = "twoNinetyNine" });
 
   // twoNinetyNine -= 100;
-  try runtime.scope.push(Instruction { .Read = "twoNinetyNine" });
-  try runtime.scope.push(Instruction { .Add = "-100" });
-  try runtime.scope.push(Instruction { .Write = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Read = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Add = "-100" });
+  try runtime.scope.push( .{ .Write = "twoNinetyNine" });
   // twoNinetyNine += 50 + 49;
-  try runtime.scope.push(Instruction { .Read = "twoNinetyNine" });
-  try runtime.scope.push(Instruction { .Add = "50" });
-  try runtime.scope.push(Instruction { .Add = "49" });
-  try runtime.scope.push(Instruction { .Write = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Read = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Add = "50" });
+  try runtime.scope.push( .{ .Add = "49" });
+  try runtime.scope.push( .{ .Write = "twoNinetyNine" });
 
   // An example of what would happen if you performed an operation but
   // did not capture the result; the allocator will get updated but
   // the var will not change.
   // twoNinetyNine - 299;
-  try runtime.scope.push(Instruction { .Read = "twoNinetyNine" });
-  try runtime.scope.push(Instruction { .Add = "-299" });
+  try runtime.scope.push( .{ .Read = "twoNinetyNine" });
+  try runtime.scope.push( .{ .Add = "-299" });
 
   // Attempts to call console.log
-  try runtime.scope.push(Instruction { .Read = "console" });
-  try runtime.scope.push(Instruction { .ReadProperty = "log" });
+  try runtime.scope.push( .{ .Read = "console" });
+  try runtime.scope.push( .{ .ReadProperty = "log" });
   var args = [_][]const u8 {
     "Hello World! :)",
   };
-  try runtime.scope.push(Instruction { .Invoke = .{ .args = &args } });
-
+  try runtime.scope.push( .{ .Invoke = .{ .args = &args } });
 
   try runtime.exec();
 

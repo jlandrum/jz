@@ -1,6 +1,7 @@
 const std = @import("std");
 const StringHashMap = std.StringHashMap;
 const Allocator = std.mem.Allocator;
+const ESScope = @import("scope.zig").ESScope;
 
 // Dynamic Vars
 pub const ESVarType = enum {
@@ -60,18 +61,35 @@ pub const ESObjectImpl = struct {
     };
     return object;
   }
+
+  pub fn deinit(self: *ESObjectImpl) void {
+    self.properties.deinit();
+  }
 };
 
 pub const ESNativeFunction = struct {
   value: usize,
 
-  pub fn call(self: *ESNativeFunction, args: [][]const u8) !void {
-    const func: *const fn([][]const u8) void = @ptrFromInt(self.value);
-    return func(args);
+  pub fn call(self: *ESNativeFunction, args: ?[][]const u8) !void {
+    const func: *const fn(?[][]const u8) void = @ptrFromInt(self.value);
+    func(args);
   }
 
   pub fn toString(_: ESNativeFunction) []const u8 {
     return "[native function]";
+  }
+};
+
+pub const ESFunction = struct {
+  scope: *ESScope,
+
+  pub fn call(self: *ESFunction, _: ?[][]const u8) anyerror!void {
+    std.debug.print("Invoked!", .{});
+    try self.scope.exec();
+  }
+
+  pub fn toString(_: *const ESFunction) []const u8 {
+    return "fn";
   }
 };
 
@@ -86,7 +104,7 @@ pub const ESString = struct {
 pub const ESType = union(enum) {
   Number: ESNumber,
   String: ESString,
-  // Function: *const ESFunction,
+  Function: ESFunction,
   Undefined: ESUndefined,
   NativeFunction: ESNativeFunction,
   Object: ESObject,
@@ -116,10 +134,20 @@ pub const ESReference = struct {
 
 // Call Stack
 pub const Instruction = union(enum) {
-  /// Sets a value
+  /// Declares a variable
+  Declare: struct {
+    identifier: []const u8,
+    type: ESVarType,
+  },
+  /// Sets a primitive value
   Set: struct {
     identifier: []const u8,
     value: []const u8,
+  },
+  // Sets an object value
+  SetReference: struct {
+    identifier: []const u8,
+    value: ESType,
   },
   /// Reads a value into the register
   Read: []const u8,
@@ -131,6 +159,6 @@ pub const Instruction = union(enum) {
   ReadProperty: []const u8,
   /// Invokes the currently loaded property as a method
   Invoke: struct {
-     args: [][]const u8,
+     args: ?[][]const u8,
   }
 };
