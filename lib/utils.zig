@@ -22,6 +22,8 @@ pub fn parseNumber(str: []const u8) f64 {
     return number;
 }
 
+pub const EmptyArray = &[_][]const u8{};
+
 // pub fn add(a: ESType, b: ESType) ESType {
 //
 // }

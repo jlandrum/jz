@@ -73,9 +73,11 @@ pub const ESScope = struct {
   }
 
   fn declareVar(self: *ESScope, identifier: []const u8, vartype: ESVarType) !void {
+    const key = try self.allocator.alloc(u8, identifier.len);
+    std.mem.copy(u8, key, identifier);
+
     if (self.vars.get(identifier)) |value| {
       if (value.vartype == .CONST) {
-        std.debug.print("Attempted to redeclare const {s}", .{identifier});
         return error.CannotRedeclareConst;
       }
     }
@@ -88,7 +90,7 @@ pub const ESScope = struct {
       .readonly = false
     };
 
-    try self.vars.put(identifier, ptr);
+    try self.vars.put(key, ptr);
   }
 
   fn assignVar(self: *ESScope, identifier: []const u8, value: ESType) !void {
@@ -107,6 +109,21 @@ pub const ESScope = struct {
     childScope.parentScope = self;
     _ = try self.childScopes.append(childScope);
     return childScope;
+  }
+
+  pub fn getValue(self: *ESScope, identifier: []const u8) ![]const u8 {
+    if (self.vars.get(identifier)) |v| {
+      switch (v.value) {
+        .String => |str| return str.toString(),
+        .Number => |num| return num.toString(),
+        .Undefined => |undf| return undf.toString(),
+        .Object => |obj| return obj.toString(),
+        .Function => |func| return func.toString(),
+        .NativeFunction => |fun| return fun.toString(),
+      }
+    } else {
+      return "undefined";
+    }
   }
 
   pub fn debugValue(self: *ESScope, identifier: []const u8) !void {
@@ -138,26 +155,44 @@ pub const ESScope = struct {
     return null;
   }
 
-  pub fn exec(self: *ESScope) !void {
+  fn stringToESType(self: *ESScope, value: []const u8) !ESType {
+    switch (value[0]) {
+      // Strings
+      '"' => return .{ .String = .{ .value = value[1..value.len-1] }},
+      '\'' => return .{ .String = .{ .value = value[1..value.len-1] }},
+      // Numbers or vars
+      else => {
+        if (utils.isNumber(value)) {
+          return .{ .Number = .{ .value = utils.parseNumber(value) }};
+        } else if (self.getVar(value)) |variable| {
+          return variable;
+        } else {
+          return error.InvalidAssignment;
+        }
+      }
+    }
+  }
+
+  pub fn exec(self: *ESScope, _args: ?[][]const u8) !void {
+    if (_args) |args| {
+      for (args, 0..) |arg, i| {
+        var buf: [10]u8 = undefined;
+        const index = try std.fmt.bufPrint(buf[0..], ":{d}", .{i});
+        const value = try self.stringToESType(arg);
+
+        try self.declareVar(index, .CONST);
+        try self.assignVar(index, value);
+      }
+    }
+
     for (self.callStack.items) |call| {
       switch (call.*) {
         .Declare => |declVar| {
           try self.declareVar(declVar.identifier, declVar.type);
         },
         .Set => |inv| {
-          switch (inv.value[0]) {
-            '"' => try self.assignVar(inv.identifier, .{ .String = .{ .value = inv.value[1..inv.value.len-1] }}),
-            '\'' => try self.assignVar(inv.identifier, .{ .String = .{ .value = inv.value[1..inv.value.len-1] }}),
-            else => {
-              if (utils.isNumber(inv.value)) {
-                try self.assignVar(inv.identifier, .{ .Number = .{ .value = utils.parseNumber(inv.value) }});
-              } else if (self.getVar(inv.value)) |variable| {
-                try self.assignVar(inv.identifier, variable);
-              } else {
-                return error.InvalidAssignment;
-              }
-            }
-          }
+          const value = try stringToESType(self, inv.value);
+          try self.assignVar(inv.identifier, value);
         },
         .SetReference => |setref| {
           try self.assignVar(setref.identifier, setref.value);
@@ -241,7 +276,14 @@ pub const ESScope = struct {
             }
           }
           // NO-OP
-        }
+        },
+        .Return => {
+          if (self.parentScope) |parentScope| {
+            parentScope.register = self.register;
+          } else {
+            return error.ReturnFromRootScope;
+          }
+        },
       }
     }
     //return error.NotImplemented;
@@ -259,9 +301,19 @@ pub const ESScope = struct {
 
   pub fn deinit(self: *ESScope) void {
     // Destroy variables
-    var it = self.vars.valueIterator();
-    while (it.next()) |entry| {
-      self.allocator.destroy(entry.*);
+
+    {
+      var it = self.vars.valueIterator();
+      while (it.next()) |entry| {
+        self.allocator.destroy(entry.*);
+      }
+    }
+
+    {
+      var it = self.vars.keyIterator();
+      while (it.next()) |entry| {
+        self.allocator.free(entry.*);
+      }
     }
 
     // Destroy call stack

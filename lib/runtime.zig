@@ -45,7 +45,7 @@ pub const ESRuntime = struct {
   }
 
   pub fn exec(self: *ESRuntime) !void {
-    return try self.scope.exec();
+    return try self.scope.exec(utils.EmptyArray);
   }
 
   pub fn deinit(self: *ESRuntime) void {
@@ -112,26 +112,82 @@ test "Create and run method" {
 
   // const add;
   try runtime.scope.push( .{ .Declare = .{ .identifier = "add",  .type = .CONST } });
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "result",  .type = .LET } });
 
-  // add = () => { console.log("Hello World! :)"); }
+  // add = (a, b) => { return a + b; }
+  //
+  // note: This can be simplified to:
+  // try fnScope.push( .{ .Read = ":0" });
+  // try fnScope.push( .{ .Add = ":1" });
+  // try fnScope.push( .{ .Return = {} });
+  //
+  // This however, demonstrates how JS will put the arguments into scope
+  // as variables.
   const fnScope = try runtime.scope.createScope();
-  try fnScope.push( .{ .Read = "console" });
-  try fnScope.push( .{ .ReadProperty = "log" });
-  var args = [_][]const u8 {
-    "Hello World! :)",
-  };
-  try fnScope.push( .{ .Invoke = .{ .args = &args } });
+  try fnScope.push( .{ .Declare = .{ .identifier = "a",  .type = .CONST } });
+  try fnScope.push( .{ .Set = .{ .identifier = "a", .value = ":0" }});
+  try fnScope.push( .{ .Declare = .{ .identifier = "b",  .type = .CONST } });
+  try fnScope.push( .{ .Set = .{ .identifier = "b", .value = ":1" }});
+  try fnScope.push( .{ .Read = "a" });
+  try fnScope.push( .{ .Add = "b" });
+  try fnScope.push( .{ .Return = {} });
   try runtime.scope.push( .{ .SetReference = .{ .identifier = "add", .value = .{
     .Function = .{
       .scope = fnScope,
     },
   }}});
 
-  // add();
+  // var result = add("10", "20");
   try runtime.scope.push( .{ .Read = "add" });
-  try runtime.scope.push( .{ .Invoke = .{ .args = null }});
+  var args = [_][]const u8 { "10", "20" };
+  try runtime.scope.push( .{ .Invoke = .{ .args = &args }});
+  try runtime.scope.push( .{ .Write = "result" });
 
   try runtime.exec();
+
+  var result = try runtime.scope.getValue("result");
+  try std.testing.expectEqualStrings("30", result);
+}
+
+test "Access vars from upper scope" {
+  const runtime = try ESRuntime.init(TestAllocator);
+  defer runtime.deinit();
+
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "a", .type = .CONST }});
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "funcA", .type = .CONST }});
+  try runtime.scope.push( .{ .Declare = .{ .identifier = "ret", .type = .CONST }});
+
+  try runtime.scope.push( .{ .Set = .{ .identifier = "a", .value = "25" }});
+
+  const fnScope = try runtime.scope.createScope();
+  try fnScope.push( .{ .Declare = .{ .identifier = "funcB", .type = .CONST }});
+  try runtime.scope.push( .{ .SetReference = .{ .identifier = "funcA", .value = .{
+    .Function = .{
+      .scope = fnScope
+    }
+  }}});
+
+  const nestedFnScope = try fnScope.createScope();
+  try nestedFnScope.push( .{ .Read = "a" });
+  try nestedFnScope.push( .{ .Add = "15" });
+  try nestedFnScope.push( .{ .Return = {} });
+  try fnScope.push( .{ .SetReference = .{ .identifier = "funcB", .value = .{
+    .Function = .{
+      .scope = nestedFnScope
+    }
+  }}});
+  try fnScope.push( .{ .Read = "funcB" });
+  try fnScope.push( .{ .Invoke = .{ .args = utils.EmptyArray }});
+  try fnScope.push( .{ .Return = {} });
+
+  try runtime.scope.push( .{ .Read = "funcA" });
+  try runtime.scope.push( .{ .Invoke = .{ .args = utils.EmptyArray }});
+  try runtime.scope.push( .{ .Write = "ret" });
+
+  try runtime.exec();
+
+  var result = try runtime.scope.getValue("ret");
+  try std.testing.expectEqualStrings("40", result);
 }
 
 test "Dev Testbench" {
@@ -180,7 +236,7 @@ test "Dev Testbench" {
   try runtime.scope.push( .{ .Read = "console" });
   try runtime.scope.push( .{ .ReadProperty = "log" });
   var args = [_][]const u8 {
-    "Hello World! :)",
+    "\nHello from console.log!\n",
   };
   try runtime.scope.push( .{ .Invoke = .{ .args = &args } });
 

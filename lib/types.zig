@@ -13,6 +13,7 @@ pub const ESNumber = struct {
 
   pub fn toString(self: *const ESNumber) []const u8 {
     var integer: bool = self.value == std.math.round(self.value);
+    // TODO: Replace with ArrayList
     var buf: [60]u8 = undefined;
 
     if (std.math.isNan(self.value)) {
@@ -83,9 +84,8 @@ pub const ESNativeFunction = struct {
 pub const ESFunction = struct {
   scope: *ESScope,
 
-  pub fn call(self: *ESFunction, _: ?[][]const u8) anyerror!void {
-    std.debug.print("Invoked!", .{});
-    try self.scope.exec();
+  pub fn call(self: *ESFunction, args: ?[][]const u8) anyerror!void {
+    try self.scope.exec(args);
   }
 
   pub fn toString(_: *const ESFunction) []const u8 {
@@ -160,5 +160,7 @@ pub const Instruction = union(enum) {
   /// Invokes the currently loaded property as a method
   Invoke: struct {
      args: ?[][]const u8,
-  }
+  },
+  /// Pushes the current scopes' register to the parent scope.
+  Return: void,
 };
