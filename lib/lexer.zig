@@ -1,17 +1,14 @@
-// TODO: Don't look at me - I'm broken while the runtime is being worked on :)
-
 const std = @import("std");
+
+const ESRuntime = @import("runtime.zig").ESRuntime;
 
 const Allocator = std.mem.Allocator;
 const TestAllocator = std.testing.allocator;
 const ArrayList = std.ArrayList;
-
 const equals = std.mem.eql;
 
 const types = @import("./types.zig");
-
-const ESCall = types.ESCall;
-const ESVarAssign = types.ESVarAssign;
+const Instruction = types.Instruction;
 
 const ESLexerError = error {
   ParseError,
@@ -21,9 +18,7 @@ const ParseError = struct {
   cause: []const u8,
 };
 
-const ESToken = struct {
-  value: types.ESVar,
-};
+const ESToken = struct { value: types.ESVar };
 const ESTokenList = std.ArrayList(ESToken);
 
 const Context = enum {
@@ -34,12 +29,12 @@ const Context = enum {
 pub const ESLexer = struct {
   allocator: Allocator,
   tokens: ArrayList([]const u8),
-  callList: ArrayList(ESCall),
+  callList: ArrayList(Instruction),
   err: ?ParseError,
 
   pub fn init(allocator: Allocator) ESLexer {
     return ESLexer {
-      .callList = ArrayList(ESCall).init(allocator),
+      .callList = ArrayList(Instruction).init(allocator),
       .tokens = ArrayList([]const u8).init(allocator),
       .err = null,
       .allocator = allocator,
@@ -71,74 +66,45 @@ pub const ESLexer = struct {
 
   fn parse(self: *ESLexer, text: []const u8) !void {
     try self.tokenize(text);
+    var offset: u8 = 0;
 
-    var start: u8 = 0;
-    var end: u8 = 1;
-    // var context: Context = .none;
-
-    while (start < self.tokens.items.len) {
-      var focus = self.tokens.items[start];
+    while (offset < self.tokens.items.len) {
+      var focus = self.tokens.items[offset];
 
       // Ignore semicolons
       if (equals(u8, focus, ";")) {
-        start += 1;
+        offset += 1;
+        continue;
       }
+
       // Check for var assignment
       else if (equals(u8, focus, "var") or equals(u8, focus, "const") or equals(u8, focus, "let")) {
-         var identifier = self.tokens.items[start + 1];
-         var assign = self.tokens.items[start + 2];
+        var identifier = self.tokens.items[offset + 1];
+        var assign = self.tokens.items[offset + 2];
+        var rvalue = self.tokens.items[offset + 3];
 
-         // This won't work for complex statements, yet.
-         var value = self.tokens.items[start + 3];
-
-         // Ensure properly formatted assign.
-         if (!equals(u8, assign, "=")) {
-           var err = try std.fmt.allocPrint(self.allocator, "Expected =, got {s}", .{assign});
-           self.err =  ParseError{.cause = err };
-           return ESLexerError.ParseError;
-         }
-
-         try self.callList.append(ESCall{
-          .VarAssign = ESVarAssign{
-            .name = identifier,
-            .value = value,
-            .type = .esvar, // TODO: All vars will be standard vars for now
-            }
-         });
-
-         // Log action
-         std.debug.print("ASSIGN {s} = {s}\n", .{identifier, value});
-
-         // Move past this statement
-         start += 4;
-         end = start;
-      }
-      else
-      {
-        // Assume it's an operation
-        var identifier = self.tokens.items[start];
-        var action = self.tokens.items[start+1];
-        var val = self.tokens.items[start+2];
-
-        if (action[0] == '(') {
-          std.debug.print("INVOKE {s}\n", .{identifier});
-        } else if (action[0] == '.') {
-          std.debug.print("ACCESS {s}\n", .{identifier});
-        } else {
-          std.debug.print("OPERATION {s} {s} {s}\n", .{focus, action, val});
-          start += 2;
-          end = start;
+        // Ensure properly formatted assign.
+        if (!equals(u8, assign, "=")) {
+         var err = try std.fmt.allocPrint(self.allocator, "Expected =, got {s}", .{assign});
+         self.err = ParseError{ .cause = err };
+         return ESLexerError.ParseError;
         }
 
-        // while (self.tokens.items[start][0] != ';') {
-        //   start+=1;
-        // }
-        // end=start;
-        //
-        //
-        // // move ahead
-        start += 1;
+        try self.callList.append( .{ .Declare = .{
+         .identifier = identifier,
+         .type = .LET,
+        }});
+
+        try self.callList.append( .{ .Set = .{
+          .identifier = identifier,
+          .value = rvalue,
+        }});
+
+        // Move past this statement
+        offset += 3;
       }
+
+      offset += 1;
     }
   }
 
@@ -201,18 +167,37 @@ pub const ESLexer = struct {
   }
 };
 
-test "Temp" {
+test "Lexer: Read sample source file" {
+  const runtime = try ESRuntime.init(TestAllocator);
+  var lexer = ESLexer.init(TestAllocator);
+
+  defer runtime.deinit();
+  defer lexer.deinit();
+
   const input =
-    \\ var a = 1;
-    \\ a += 20300;
-    \\ console.log(a);
+    \\ var a = 100;
+    \\ var b = 200.5;
+    \\ var c = "Hello, world!";
+    \\ var d = NaN;
+    \\ var e = undefined;
   ;
 
-  var lexer = ESLexer.init(TestAllocator);
   lexer.parse(input) catch {
     std.log.err("An error occured: {s}", .{lexer.err.?.cause});
   };
-  defer lexer.deinit();
+
+  for (lexer.callList.items) |token| {
+    try runtime.scope.push(token);
+  }
+
+  try runtime.exec();
+
+  std.debug.print("\n=== Variable results ===\n", .{});
+  try runtime.scope.debugValue("a");
+  try runtime.scope.debugValue("b");
+  try runtime.scope.debugValue("c");
+  try runtime.scope.debugValue("d");
+  try runtime.scope.debugValue("e");
 
   // std.debug.print("\n", .{});
   // for (lexer.tokens.items) |slice| {
